@@ -1,4 +1,4 @@
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 import time
@@ -6,39 +6,48 @@ import time
 # ====================== Setup ======================
 embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
-vectorstore = Chroma(
-    persist_directory="./vector_db",
-    embedding_function=embeddings,
-    collection_name="my_rag_collection"   # must match what you used while creating
+# Load existing FAISS index
+try:
+    vectorstore = FAISS.load_local("./faiss_db", embeddings)
+except Exception as e:
+    print("❌ Failed to load FAISS index. Did you run embed.py?", e)
+    exit(1)
+
+retriever = vectorstore.as_retriever(
+    search_type="similarity",
+    search_kwargs={"k": 10}
 )
 
-retriever = vectorstore.as_retriever(search_kwargs={"k": 4})   # increased to 4 for better context
-
-# Use ChatOllama (better than old Ollama class)
 llm = ChatOllama(
-    model="phi3",           # or "phi3:medium" if you pulled the bigger one
-    temperature=0.3,        # lower = more factual
-    # num_ctx=4096,         # uncomment if you need larger context
+    model="tinyllama",
+    temperature=0.2,
+    num_ctx=2048,
 )
 
-# Better prompt template
+# Enhanced Prompt Template for Clinical EHR Processing
 prompt_template = ChatPromptTemplate.from_template("""
-You are a helpful medical assistant. Answer the question using only the provided context.
-If you don't know the answer based on the context, say "I don't have enough information."
+You are a highly capable AI medical assistant interacting with EHR (Electronic Health Record) data.
 
-Context:
+[ PATIENT LAB EVENT CONTEXT ]
 {context}
+
+[ STRICT RULES ]
+1. Answer using ONLY natural language. NEVER output raw SQL queries or database code.
+2. Focus on clinical summarization, specifically pointing out any values flagged as ABNORMAL.
+3. Provide cohesive patient insights based on the retrieved lab events.
+4. Output ONLY the final analytical answer. DO NOT explain your reasoning.
+5. If the answer cannot be confidently deduced from the Context, output exactly: "Not found in database".
 
 Question: {question}
 
-Answer:
+Final Clinical Answer:
 """)
 
-print("✅ RAG system ready! (Medical data loaded)\n")
+print("✅ FAISS-Backed Dynamic RAG System Ready!\n")
 
 # ====================== Query Loop ======================
 while True:
-    query = input("\nAsk your medical question (or type 'exit' to quit): ").strip()
+    query = input("\nAsk your clinical EHR question (or type 'exit'): ").strip()
     
     if query.lower() in ['exit', 'quit', 'bye']:
         print("Goodbye!")
@@ -48,21 +57,16 @@ while True:
         continue
 
     start_time = time.time()
-
-    # Retrieve relevant chunks
-    docs = retriever.invoke(query)                    # modern way (instead of get_relevant_documents)
+    docs = retriever.invoke(query)
 
     context = "\n\n".join([doc.page_content for doc in docs])
-
-    # Generate response
     prompt = prompt_template.format(context=context, question=query)
     
-    print("\nThinking...", end=" ")
+    print("\nAnalyzing Patient Records...", end=" ")
     response = llm.invoke(prompt)
     
     end_time = time.time()
 
-    print(f"\n\nAI Response ({(end_time - start_time):.1f}s):\n")
+    print(f"\n\n🩺 AI Findings ({(end_time - start_time):.1f}s):\n")
     print(response.content if hasattr(response, 'content') else response)
-    
     print("\n" + "-"*80)

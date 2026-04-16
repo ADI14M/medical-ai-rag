@@ -1,5 +1,6 @@
 # Data and Vector Store
 vector_db/
+faiss_db/
 *.pkl
 processed_data.pkl
 

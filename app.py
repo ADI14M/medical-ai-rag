@@ -1,5 +1,5 @@
 import streamlit as st
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings, ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 import time
@@ -19,10 +19,10 @@ st.markdown(
         position: sticky;
         top: 2.875rem;
         z-index: 999;
-        background-color: #0e1117;
+        background-color: #c6cbd3;
         padding-top: 1rem;
         padding-bottom: 1rem;
-        border-bottom: 1px solid #333;
+        border-bottom: 1px solid #a0a6b1;
     }
     </style>
     """,
@@ -31,26 +31,26 @@ st.markdown(
 st.title("🩺 Visukhi Medical Chatbot")
 
 # ====================== Settings ======================
-MODEL_NAME = "phi3"
+MODEL_NAME = "tinyllama"
 TEMPERATURE = 0.2
 
-# Increased limits to fetch and process far more patients per query
-TOP_K = 40
-FETCH_K = 100
-MAX_CONTEXT_CHARS = 12000
 
-# ====================== Load Vector DB ======================
+TOP_K = 8
+FETCH_K = 30
+MAX_CONTEXT_CHARS = 3000
+
+
 @st.cache_resource
 def load_vectorstore():
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
-    return Chroma(
-        persist_directory="./vector_db",
-        embedding_function=embeddings,
-        collection_name="my_rag_collection"
-    )
+    try:
+        return FAISS.load_local("./faiss_db", embeddings)
+    except Exception as e:
+        st.error(f"Failed to load FAISS DB. Run embed.py first. Error: {e}")
+        return None
 
-# ====================== Session ======================
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
@@ -59,12 +59,12 @@ if "vectorstore" not in st.session_state:
         st.session_state.vectorstore = load_vectorstore()
 
 
-# ====================== Display Chat ======================
+
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# ====================== Chat ======================
+
 if prompt := st.chat_input("Ask a medical question..."):
 
     # Safety filter
@@ -114,58 +114,52 @@ if prompt := st.chat_input("Ask a medical question..."):
                 conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
                 cur = conn.cursor()
                 
-                cur.execute("SELECT COUNT(*) FROM oads.patients")
+                cur.execute("SELECT COUNT(*) FROM ehr.patients")
                 total_patients = cur.fetchone()[0]
                 
-                cur.execute("SELECT COUNT(*) FROM oads.analysis")
-                total_analyses = cur.fetchone()[0]
-                
-                cur.execute("SELECT COUNT(*) FROM oads.studies")
-                total_studies = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM ehr.labevents")
+                total_labevents = cur.fetchone()[0]
                 
                 conn.close()
                 
                 st.session_state.db_stats = {
                     "total_patients": total_patients,
-                    "total_analyses": total_analyses,
-                    "total_studies": total_studies
+                    "total_labevents": total_labevents
                 }
             except Exception:
                 st.session_state.db_stats = {
                     "total_patients": "Unknown",
-                    "total_analyses": "Unknown",
-                    "total_studies": "Unknown"
+                    "total_labevents": "Unknown"
                 }
 
         stats = st.session_state.db_stats
 
         # ====================== PROMPT ======================
         prompt_template = ChatPromptTemplate.from_template("""
-You are a strict medical assistant.
+You are a direct, robotic medical assistant.
 
 [ DATABASE STATISTICS ]
 Total Registered Patients: {total_patients}
-Total Medical Studies: {total_studies}
-Total Image Analyses: {total_analyses}
+Total EHR Lab Events: {total_labevents}
 
-[ PATIENT RECORDS CONTEXT ]
+[ PATIENT LAB EVENT CONTEXT ]
 {context}
 
-[ RULES ]
-1. If the user asks for total counts, numbers, or aggregates, you MUST answer using the DATABASE STATISTICS.
-2. If the user asks about specific patient details, you MUST answer using the PATIENT RECORDS CONTEXT.
-3. If the answer cannot be found in either section, exactly output: "Not found in database"
-4. Do not guess or make up information.
+[ STRICT RULES ]
+1. Answer using ONLY natural language. NEVER output raw SQL queries or database code.
+2. Focus on clinical summarization, specifically pointing out any values flagged as ABNORMAL.
+3. Provide cohesive patient insights based on the retrieved lab events.
+4. Output ONLY the final analytical answer. DO NOT explain your reasoning.
+5. If the answer cannot be confidently deduced from the Context or Database Statistics, output exactly: "Not found in database".
 
 Question: {question}
 
-Answer:
+Final Clinical Answer:
 """)
 
         final_prompt = prompt_template.format(
             total_patients=stats["total_patients"],
-            total_studies=stats["total_studies"],
-            total_analyses=stats["total_analyses"],
+            total_labevents=stats["total_labevents"],
             context=context,
             question=prompt
         )
@@ -173,7 +167,8 @@ Answer:
         # ====================== LLM ======================
         llm = ChatOllama(
             model=MODEL_NAME,
-            temperature=TEMPERATURE
+            temperature=TEMPERATURE,
+            num_ctx=2048  # Hard cap memory allocation to stay under 2.5 GiB
         )
 
         stream = llm.stream(final_prompt)
