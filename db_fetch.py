@@ -13,6 +13,8 @@ def fetch_lab_events():
             connect_timeout=10
         )
         cur = conn.cursor()
+        cur.execute("SELECT current_database();")
+        print("Connected to:", cur.fetchone())
         
         # Inner join to combine patient demographics with lab data
         query = """
