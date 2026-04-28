@@ -11,24 +11,145 @@ st.set_page_config(
     layout="centered"
 )
 
+
+
+import streamlit.components.v1 as components
+
+components.html(
+    """
+    <script>
+    const doc = window.parent.document;
+    const oldBtn = doc.getElementById('chatgpt-scroll-btn');
+    if (oldBtn) oldBtn.remove();
+
+    let btn = doc.createElement('div');
+    btn.id = 'chatgpt-scroll-btn';
+    btn.innerHTML = '&#8595;'; 
+    btn.style.cssText = "position:fixed; bottom:100px; left:50%; transform:translateX(-50%); width:36px; height:36px; border-radius:50%; background-color:#ffffff; color:#333333; text-align:center; line-height:34px; font-size:20px; cursor:pointer; z-index:999999; box-shadow:0px 2px 8px rgba(0,0,0,0.15); border:1px solid #e5e5e5; display:none;";
+    doc.body.appendChild(btn);
+
+    btn.addEventListener('click', () => {
+        const msgs = doc.querySelectorAll('[data-testid=\"stChatMessage\"]');
+        if (msgs.length > 0) {
+            msgs[msgs.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+    });
+
+    setInterval(() => {
+        const msgs = doc.querySelectorAll('[data-testid=\"stChatMessage\"]');
+        if(msgs.length > 0) {
+            const lastMsg = msgs[msgs.length - 1];
+            const rect = lastMsg.getBoundingClientRect();
+            if (rect.bottom > window.parent.innerHeight + 50) {
+                btn.style.display = 'block';
+            } else {
+                btn.style.display = 'none';
+            }
+        }
+    }, 300);
+    </script>
+    """,
+    height=0
+)
+
 st.markdown(
     """
     <style>
     /* Make the title sticky */
-    div[data-testid="stVerticalBlock"] > div:first-child {
+    div[data-testid="stHeadingWithActionElements"] {
         position: sticky;
         top: 2.875rem;
         z-index: 999;
         background-color: #c6cbd3;
         padding-top: 1rem;
-        padding-bottom: 1rem;
         border-bottom: 1px solid #a0a6b1;
+    }
+    /* Stop chat text from overlapping behind the sticky input bar */
+    div.block-container {
+        padding-bottom: 150px !important;
     }
     </style>
     """,
     unsafe_allow_html=True
 )
 st.title("🩺 Visukhi Medical Chatbot")
+
+# ====================== Patient Search Sidebar ======================
+@st.cache_data(ttl=3600)
+def get_all_patient_names():
+    try:
+        import psycopg2
+        from config import DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT
+        conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT full_name FROM oads.patients ORDER BY full_name")
+        names = [row[0] for row in cur.fetchall() if row[0]]
+        conn.close()
+        return names
+    except Exception as e:
+        return []
+
+with st.sidebar:
+    st.header("🔍 Patient Search")
+    
+    patient_names = get_all_patient_names()
+    options = [""] + patient_names
+    
+    search_name = st.selectbox(
+        "Search and Select a Patient:",
+        options=options,
+        index=0,
+        help="Start typing a name to see suggestions"
+    )
+    
+    if search_name:
+        with st.spinner(f"Searching for {search_name}..."):
+            try:
+                import psycopg2
+                from config import DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT
+                conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
+                cur = conn.cursor()
+                
+                # Fetch patient summary from OADS
+                query = """
+                SELECT p.patient_id, p.full_name, p.gender, s.study_date, s.priority, i.image_type, a.findings_summary, a.confidence_score
+                FROM oads.patients p
+                LEFT JOIN oads.studies s ON p.patient_id = s.patient_id
+                LEFT JOIN oads.images i ON s.study_id = i.study_id
+                LEFT JOIN oads.analysis a ON i.image_id = a.image_id
+                WHERE p.full_name ILIKE %s
+                ORDER BY s.study_date DESC
+                LIMIT 10;
+                """
+                cur.execute(query, (f"%{search_name}%",))
+                rows = cur.fetchall()
+                conn.close()
+                
+                if rows:
+                    patient_info = rows[0]
+                    st.subheader(f"Patient: {patient_info[1]}")
+                    st.write(f"**ID:** {patient_info[0]} | **Gender:** {patient_info[2].capitalize() if patient_info[2] else 'Unknown'}")
+                    
+                    if patient_info[3]: # Has studies
+                        st.markdown("### Recent Studies & Findings")
+                        for r in rows:
+                            if r[3]: # study_date
+                                conf_str = f"(Conf: {r[7]:.2f})" if r[7] is not None else ""
+                                findings = r[6] if r[6] else "No findings recorded"
+                                img_type = r[5].upper() if r[5] else "Unknown"
+                                st.markdown(f"""
+**Date:** {r[3].strftime('%Y-%m-%d')}
+- **Type:** {img_type} ({r[4]} priority)
+- **Findings:** {findings} {conf_str}
+                                """)
+                                st.divider()
+                    else:
+                        st.info("No studies found for this patient.")
+                else:
+                    st.warning("Patient not found in database.")
+            except Exception as e:
+                st.error(f"Error fetching patient data: {e}")
+
 
 # ====================== Settings ======================
 MODEL_NAME = "tinyllama"
