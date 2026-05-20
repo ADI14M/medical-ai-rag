@@ -132,17 +132,60 @@ with st.sidebar:
                     
                     if patient_info[3]: # Has studies
                         st.markdown("### Recent Studies & Findings")
+                        studies_text = ""
                         for r in rows:
                             if r[3]: # study_date
                                 conf_str = f"(Conf: {r[7]:.2f})" if r[7] is not None else ""
                                 findings = r[6] if r[6] else "No findings recorded"
                                 img_type = r[5].upper() if r[5] else "Unknown"
+                                date_str = r[3].strftime('%Y-%m-%d')
                                 st.markdown(f"""
-**Date:** {r[3].strftime('%Y-%m-%d')}
+**Date:** {date_str}
 - **Type:** {img_type} ({r[4]} priority)
 - **Findings:** {findings} {conf_str}
                                 """)
                                 st.divider()
+                                studies_text += f"- Date: {date_str}, Type: {img_type}, Priority: {r[4]}, Findings: {findings}\n"
+                        
+                        st.markdown("---")
+                        if st.button("📄 Generate Radiology Report"):
+                            with st.spinner("Generating AI Radiology Report..."):
+                                report_prompt = f"""
+You are an expert AI radiologist. Based on the following patient details and recent study findings, generate a formal, professional radiology report.
+
+Patient Name: {patient_info[1]}
+Patient ID: {patient_info[0]}
+Gender: {patient_info[2]}
+
+Recent Studies:
+{studies_text}
+
+The report should include the following sections:
+- Patient Information
+- Clinical Indication
+- Imaging Modalities
+- Findings
+- Impression
+
+Do not output anything else but the report itself.
+"""
+                                report_llm = ChatOllama(model="tinyllama", temperature=0.1)
+                                try:
+                                    generated_report = report_llm.invoke(report_prompt).content
+                                    st.session_state[f"report_{search_name}"] = generated_report
+                                except Exception as e:
+                                    st.error(f"Failed to generate report: {e}")
+                        
+                        if f"report_{search_name}" in st.session_state:
+                            report_text = st.session_state[f"report_{search_name}"]
+                            st.markdown("### 📝 AI Radiology Report")
+                            st.text_area("Report Preview", report_text, height=300)
+                            st.download_button(
+                                label="⬇️ Download Report",
+                                data=report_text,
+                                file_name=f"Radiology_Report_{patient_info[1].replace(' ', '_')}.txt",
+                                mime="text/plain"
+                            )
                     else:
                         st.info("No studies found for this patient.")
                 else:
@@ -166,7 +209,7 @@ def load_vectorstore():
     embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
     try:
-        return FAISS.load_local("./faiss_db", embeddings)
+        return FAISS.load_local("./faiss_db", embeddings, allow_dangerous_deserialization=True)
     except Exception as e:
         st.error(f"Failed to load FAISS DB. Run embed.py first. Error: {e}")
         return None
@@ -235,10 +278,10 @@ if prompt := st.chat_input("Ask a medical question..."):
                 conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
                 cur = conn.cursor()
                 
-                cur.execute("SELECT COUNT(*) FROM ehr.patients")
+                cur.execute("SELECT COUNT(*) FROM oads.patients")
                 total_patients = cur.fetchone()[0]
                 
-                cur.execute("SELECT COUNT(*) FROM ehr.labevents")
+                cur.execute("SELECT COUNT(*) FROM oads.studies")
                 total_labevents = cur.fetchone()[0]
                 
                 conn.close()

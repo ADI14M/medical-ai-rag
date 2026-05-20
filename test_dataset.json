@@ -1,0 +1,14 @@
+[
+    {
+        "question": "What is the primary condition diagnosed in Ramesh's recent imaging study?",
+        "ground_truth": "Ramesh's recent imaging study indicates a condition that requires medical attention. The specific findings should be checked in his latest analysis report."
+    },
+    {
+        "question": "What are the common symptoms of pneumonia according to the medical guidelines in the database?",
+        "ground_truth": "The database should list symptoms like cough, fever, shortness of breath, and chest pain for pneumonia."
+    },
+    {
+        "question": "Summarize the findings for a patient with a high confidence score in their analysis.",
+        "ground_truth": "The findings should highlight specific anatomical abnormalities or conditions identified in the imaging, corroborated by the high confidence score."
+    }
+]

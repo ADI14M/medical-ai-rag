@@ -1,0 +1,41 @@
+Loading Embeddings (nomic-embed-text)...
+FAISS index loaded successfully.
+
+Starting Evaluation on 3 samples...
+Generator Model: tinyllama | Judge Model: tinyllama
+
+--- Sample 1 ---
+Q: What is the primary condition diagnosed in Ramesh's recent imaging study?
+Generated Answer: The primary condition diagnosed in Ramesh's recent imaging study is Abnormality detected, as determined by the AI Confidence Score of 0.60.
+Scores: Faithfulness: 4/5 | Relevance: None/5 | Correctness: 2/5
+Feedback: The primary condition diagnosed in Ramesh's recent imaging study is Abnormality detected, as determined by the AI Confidence Score of 0.60.
+
+--- Sample 2 ---
+Q: What are the common symptoms of pneumonia according to the medical guidelines in the database?
+Generated Answer: The AI assistant has been programmed with a database containing medical guidelines for pneumonia. The following are some common symptoms mentioned in these guidelines:
+
+1. Coughing up blood or phlegm
+2. Fever over 38°C (100°F)
+3. Chest pain or pressure
+4. Shortness of breath or difficulty breathing
+5. Sore throat with fever and cough
+6. Fatigue, weakness, or shortness of breath
+7. Nausea or vomiting
+8. Dry cough
+9. Headache
+10. Muscle aches or pains
+
+These symptoms are not exclusive to pneumonia but can be a sign of other respiratory illnesses such as influenza, bronchitis, or asthma. The AI assistant will provide further guidance and recommendations based on the patient's medical history and current symptoms.
+Scores: Faithfulness: 0/5 | Relevance: 0/5 | Correctness: 0/5
+Feedback: Failed to parse JSON.
+
+--- Sample 3 ---
+Q: Summarize the findings for a patient with a high confidence score in their analysis.
+Generated Answer: The patient, John, has an abnormality detected during a magnetic resonance imaging (MRI) study. The AI assistant's analysis indicates that the findings are "auto generated" and have a confidence score of 0.98. The patient's image type is ct, indicating low priority. The AI assistant also notes that John's study date is on a high-priority list.
+Scores: Faithfulness: 0/5 | Relevance: 0/5 | Correctness: 0/5
+Feedback: Failed to parse JSON.
+
+=== EVALUATION SUMMARY ===
+Average Faithfulness:     1.33/5.00
+Average Answer Relevance: 0.00/5.00
+Average Correctness:      0.67/5.00

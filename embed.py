@@ -1,12 +1,14 @@
 import os
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
-from db_fetch import fetch_lab_events
+from extract_data import extract_medical_documents
 import time
 
 def create_embeddings():
     print("\n[ Phase 1 ] Fetching Medical EHR Data...")
-    docs, metadatas = fetch_lab_events()
+    data = extract_medical_documents()
+    docs = data["documents"]
+    metadatas = data["metadatas"]
     
     if not docs:
         print("No documents found in EHR to embed.")

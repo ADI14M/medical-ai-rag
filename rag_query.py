@@ -8,7 +8,7 @@ embeddings = OllamaEmbeddings(model="nomic-embed-text")
 
 # Load existing FAISS index
 try:
-    vectorstore = FAISS.load_local("./faiss_db", embeddings)
+    vectorstore = FAISS.load_local("./faiss_db", embeddings, allow_dangerous_deserialization=True)
 except Exception as e:
     print("❌ Failed to load FAISS index. Did you run embed.py?", e)
     exit(1)
