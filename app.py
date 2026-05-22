@@ -169,7 +169,7 @@ The report should include the following sections:
 
 Do not output anything else but the report itself.
 """
-                                report_llm = ChatOllama(model="tinyllama", temperature=0.1)
+                                report_llm = ChatOllama(model="phi3", temperature=0.1)
                                 try:
                                     generated_report = report_llm.invoke(report_prompt).content
                                     st.session_state[f"report_{search_name}"] = generated_report
@@ -195,7 +195,7 @@ Do not output anything else but the report itself.
 
 
 # ====================== Settings ======================
-MODEL_NAME = "tinyllama"
+MODEL_NAME = "phi3"
 TEMPERATURE = 0.2
 
 
