@@ -281,9 +281,21 @@ if prompt := st.chat_input("Ask a medical question..."):
                 rows = cur.fetchall()
                 conn.close()
                 
-                context_parts = []
+                patient_records = {}
                 for pid, name, img_type, findings in rows:
-                    context_parts.append(f"Patient ID: {pid} | Patient Name: {name} | Scan Type: {img_type.upper()} | Findings: {findings}")
+                    if pid not in patient_records:
+                        patient_records[pid] = {
+                            "name": name,
+                            "img_type": img_type.upper(),
+                            "findings": set()
+                        }
+                    if findings:
+                        patient_records[pid]["findings"].add(findings)
+                
+                context_parts = []
+                for pid, info in patient_records.items():
+                    findings_str = ", ".join(info["findings"])
+                    context_parts.append(f"Patient ID: {pid} | Patient Name: {info['name']} | Scan Type: {info['img_type']} | Findings: {findings_str}")
                 context = "\n".join(context_parts)
             except Exception as e:
                 context = "Error retrieving matching patients from database."
