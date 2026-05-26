@@ -1,0 +1,20 @@
+{
+    "evaluation_timestamp": "2026-05-26T10:19:48.437072",
+    "total_queries": 20,
+    "averages": {
+        "retrieval_latency_sec": 0.049,
+        "generation_latency_sec": 9.675,
+        "end_to_end_latency_sec": 9.724,
+        "retrieval_precision": 0.412,
+        "recall_at_5": 0.469,
+        "retrieval_relevance": 4.45,
+        "answer_correctness": 3.9,
+        "answer_relevance": 4.4,
+        "context_faithfulness": 4.4,
+        "clinical_coherence": 4.65,
+        "hallucination_rate_pct": 20.0,
+        "hallucination_score": 4.2,
+        "unsupported_claims_score": 4.65,
+        "missing_findings_score": 3.65
+    }
+}
