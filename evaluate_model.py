@@ -12,8 +12,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from config import DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT
 
 # ====================== CONFIGURATION ======================
-RAG_MODEL = "phi3"
-JUDGE_MODEL = "phi3"
+RAG_MODEL = "tinyllama"
+JUDGE_MODEL = "tinyllama"
 EMBED_MODEL = "nomic-embed-text"
 FAISS_DB_PATH = "./faiss_db"
 PROCESSED_DATA_PATH = "processed_data.pkl"

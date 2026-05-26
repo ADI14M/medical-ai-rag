@@ -75,8 +75,9 @@ def extract_medical_documents():
                 if isinstance(study_date, datetime):
                     study_date = study_date.strftime("%Y-%m-%d")
 
-                # ✅ DEDUP KEY (fixed to include confidence)
-                key_str = f"{patient_id}|{study_date}|{image_type}|{findings}|{confidence}"
+                # ✅ DEDUP KEY (fixed to include formatted confidence)
+                confidence_str = f"{confidence:.2f}"
+                key_str = f"{patient_id}|{study_date}|{image_type}|{findings}|{confidence_str}"
                 key_hash = hashlib.md5(key_str.encode()).hexdigest()
 
                 if key_hash in seen:

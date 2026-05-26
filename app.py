@@ -169,7 +169,7 @@ The report should include the following sections:
 
 Do not output anything else but the report itself.
 """
-                                report_llm = ChatOllama(model="phi3", temperature=0.1)
+                                report_llm = ChatOllama(model="tinyllama", temperature=0.1)
                                 try:
                                     generated_report = report_llm.invoke(report_prompt).content
                                     st.session_state[f"report_{search_name}"] = generated_report
@@ -195,7 +195,7 @@ Do not output anything else but the report itself.
 
 
 # ====================== Settings ======================
-MODEL_NAME = "phi3"
+MODEL_NAME = "tinyllama"
 TEMPERATURE = 0.2
 
 
@@ -248,27 +248,61 @@ if prompt := st.chat_input("Ask a medical question..."):
 
         start_time = time.time()
 
-        # ====================== DYNAMIC RETRIEVER ======================
-        search_kwargs = {"k": TOP_K, "fetch_k": FETCH_K, "lambda_mult": 0.5}
-
-        retriever = st.session_state.vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs=search_kwargs
-        )
-
-        # ====================== RETRIEVE ======================
-        docs = retriever.invoke(prompt)
-
-        # ====================== CONTEXT ======================
-        context = ""
-        used_docs = []
-
-        for doc in docs:
-            if len(context) + len(doc.page_content) < MAX_CONTEXT_CHARS:
-                context += doc.page_content + "\n\n"
-                used_docs.append(doc)
-            else:
+        # ====================== DYNAMIC RETRIEVER / HYBRID QUERY ======================
+        # Detect if the query is an aggregate request asking for patients with a specific modality
+        query_lower = prompt.lower()
+        matched_modality = None
+        for m in ["ct", "mri", "xray", "x-ray", "ultrasound"]:
+            if m in query_lower:
+                matched_modality = m
                 break
+                
+        is_list_query = any(w in query_lower for w in ["patients with", "who has", "patients having", "list of patients", "which patients", "who had"])
+        
+        context = ""
+        
+        if is_list_query and matched_modality:
+            # Hybrid Path: Query database directly for all patients with this scan type to bypass vector store capping
+            try:
+                import psycopg2
+                from config import DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT
+                conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
+                cur = conn.cursor()
+                sql_modality = "xray" if matched_modality in ["xray", "x-ray"] else matched_modality
+                cur.execute("""
+                    SELECT DISTINCT p.patient_id, p.full_name, i.image_type, a.findings_summary
+                    FROM oads.patients p
+                    JOIN oads.studies s ON p.patient_id = s.patient_id
+                    JOIN oads.images i ON s.study_id = i.study_id
+                    JOIN oads.analysis a ON i.image_id = a.image_id
+                    WHERE i.image_type ILIKE %s
+                    ORDER BY p.patient_id;
+                """, (sql_modality,))
+                rows = cur.fetchall()
+                conn.close()
+                
+                context_parts = []
+                for pid, name, img_type, findings in rows:
+                    context_parts.append(f"Patient ID: {pid} | Patient Name: {name} | Scan Type: {img_type.upper()} | Findings: {findings}")
+                context = "\n".join(context_parts)
+            except Exception as e:
+                context = "Error retrieving matching patients from database."
+        else:
+            # Standard Path: MMR Vector Search for patient-specific or general questions
+            search_kwargs = {"k": TOP_K, "fetch_k": FETCH_K, "lambda_mult": 0.5}
+            retriever = st.session_state.vectorstore.as_retriever(
+                search_type="mmr",
+                search_kwargs=search_kwargs
+            )
+            docs = retriever.invoke(prompt)
+            
+            used_docs = []
+            for doc in docs:
+                if len(context) + len(doc.page_content) < MAX_CONTEXT_CHARS:
+                    context += doc.page_content + "\n\n"
+                    used_docs.append(doc)
+                else:
+                    break
 
         # ====================== DB STATS (FOR AGGREGATE QUERIES) ======================
         if "db_stats" not in st.session_state:
@@ -284,16 +318,39 @@ if prompt := st.chat_input("Ask a medical question..."):
                 cur.execute("SELECT COUNT(*) FROM oads.studies")
                 total_labevents = cur.fetchone()[0]
                 
+                # Fetch imaging summary mapping to support aggregate patient scans queries
+                cur.execute("""
+                    SELECT DISTINCT p.patient_id, p.full_name, i.image_type
+                    FROM oads.patients p
+                    JOIN oads.studies s ON p.patient_id = s.patient_id
+                    JOIN oads.images i ON s.study_id = i.study_id
+                    ORDER BY p.patient_id
+                """)
+                rows = cur.fetchall()
                 conn.close()
+                
+                patient_map = {}
+                for pid, name, img_type in rows:
+                    if name not in patient_map:
+                        patient_map[name] = []
+                    if img_type:
+                        patient_map[name].append(img_type.upper())
+                
+                summary_lines = ["[ PATIENT IMAGING MAPPING ]"]
+                for name, modalities in patient_map.items():
+                    summary_lines.append(f"- {name}: {', '.join(modalities)}")
+                imaging_summary = "\n".join(summary_lines)
                 
                 st.session_state.db_stats = {
                     "total_patients": total_patients,
-                    "total_labevents": total_labevents
+                    "total_labevents": total_labevents,
+                    "imaging_summary": imaging_summary
                 }
             except Exception:
                 st.session_state.db_stats = {
                     "total_patients": "Unknown",
-                    "total_labevents": "Unknown"
+                    "total_labevents": "Unknown",
+                    "imaging_summary": ""
                 }
 
         stats = st.session_state.db_stats
@@ -305,6 +362,7 @@ You are a direct, robotic medical assistant.
 [ DATABASE STATISTICS ]
 Total Registered Patients: {total_patients}
 Total EHR Lab Events: {total_labevents}
+{imaging_summary}
 
 [ PATIENT LAB EVENT CONTEXT ]
 {context}
@@ -324,6 +382,7 @@ Final Clinical Answer:
         final_prompt = prompt_template.format(
             total_patients=stats["total_patients"],
             total_labevents=stats["total_labevents"],
+            imaging_summary=stats.get("imaging_summary", ""),
             context=context,
             question=prompt
         )

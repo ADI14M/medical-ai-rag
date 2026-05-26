@@ -6,10 +6,10 @@ from langchain_core.prompts import ChatPromptTemplate
 import re
 
 # ====================== Configuration ======================
-RAG_MODEL = "phi3"
+RAG_MODEL = "tinyllama"
 # For the Judge, it's highly recommended to use a stronger model (like llama3, mistral, or phi3)
 # If you only have tinyllama installed, it will try its best but the evaluation scores might be inconsistent.
-JUDGE_MODEL = "phi3" 
+JUDGE_MODEL = "tinyllama" 
 EMBED_MODEL = "nomic-embed-text"
 TEST_DATA_PATH = "test_dataset.json"
 
