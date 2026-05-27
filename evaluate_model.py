@@ -44,10 +44,9 @@ print(f"📥 Loading FAISS Vector Index from '{FAISS_DB_PATH}'...")
 try:
     embeddings = OllamaEmbeddings(model=EMBED_MODEL)
     vectorstore = FAISS.load_local(FAISS_DB_PATH, embeddings, allow_dangerous_deserialization=True)
-    # Match the MMR settings used in production (app.py)
     retriever = vectorstore.as_retriever(
         search_type="mmr",
-        search_kwargs={"k": 8, "fetch_k": 30, "lambda_mult": 0.5}
+        search_kwargs={"k": 10, "fetch_k": 40, "lambda_mult": 0.5}
     )
     print("FAISS index loaded successfully.")
 except Exception as e:
@@ -267,14 +266,211 @@ TEST_CASES = [
 
 # ====================== HELPER FUNCTIONS ======================
 
-def fetch_db_statistics():
-    """Queries PostgreSQL for live database statistics used in the RAG prompt."""
+def extract_and_verify_patient(prompt):
+    """
+    Parses the prompt to detect any patient name or ID.
+    If a patient name or ID is present, performs dynamic lookup & exact database verification.
+    Returns:
+        is_patient_query (bool): True if the query targets a patient.
+        patient_id (int or None): The verified patient ID.
+        patient_name (str or None): The verified patient name.
+        lookup_status (str): 'verified' or 'not_found' or 'not_patient_query'.
+        detected_name (str or None): The exact name string that was resolved.
+    """
+    import re
+    import psycopg2
+    from config import DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DB_PORT
+
+    query_lower = prompt.lower()
+    
+    # 1. Check for ID (e.g. "Patient 3" or just "3")
+    match_id = re.search(r'\bpatient\s+(?:id\s+)?(\d+)\b', query_lower)
+    if not match_id:
+        match_id = re.search(r'\b(?:patient\s+)?(?:id\s*)?#?(\d+)\b', query_lower)
+        
+    patient_id_num = None
+    if match_id:
+        patient_id_num = int(match_id.group(1))
+
+    # 2. Stopword filtering to extract name candidate words
+    words = re.findall(r'\b[a-zA-Z]+\b', prompt)
+    stopwords = {
+        # Query intent words
+        "patient", "patients", "summarize", "history", "insights", "report",
+        "findings", "results", "detail", "details", "visit", "visits", "multiple",
+        "retrieve", "dates", "recorded", "identify", "detect", "generate",
+        "structured", "draft", "formal", "impression", "impressions", "recommendations",
+        "recommendation", "suggest", "steps", "provide", "list", "show", "give", "get",
+        "me", "us",
+        # Common prepositions / articles / verbs
+        "of", "the", "a", "an", "is", "are", "what", "recent", "who", "has",
+        "having", "which", "had", "for", "with", "on", "based", "their", "all",
+        "there", "any", "does", "have", "made", "next", "do", "in", "and", "or",
+        # Clinical / imaging terms (modalities, adjectives)
+        "scan", "scans", "scanning", "abnormal", "imaging", "priority", "levels",
+        "studies", "study", "result", "flagged", "abnormality", "minor", "issue",
+        "issues", "clinical", "ct", "mri", "xray", "mr", "ultrasound", "x",
+        "radiology", "radiological"
+    }
+    candidate_words = [w for w in words if w.lower() not in stopwords]
+    candidate_words.sort(key=len, reverse=True)
+
+    # If neither candidate name words nor ID are found, it's not a patient-specific query
+    if not candidate_words and not patient_id_num:
+        return False, None, None, "not_patient_query", None
+
+    candidate_name = None
+
     try:
         conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
         cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM oads.patients")
+
+        # A. Resolve using patient ID if explicitly specified
+        if patient_id_num:
+            cur.execute("SELECT full_name FROM oads.patients WHERE patient_id = %s", (patient_id_num,))
+            row = cur.fetchone()
+            if row:
+                candidate_name = row[0]
+
+        # B. Resolve using name phrases dynamically (e.g. "Priya Reddy")
+        if not candidate_name and len(candidate_words) >= 2:
+            for i in range(len(candidate_words) - 1):
+                phrase = f"{candidate_words[i]} {candidate_words[i+1]}"
+                cur.execute("SELECT full_name FROM oads.patients WHERE full_name ILIKE %s ORDER BY patient_id LIMIT 1", (f"%{phrase}%",))
+                row = cur.fetchone()
+                if row:
+                    candidate_name = row[0]
+                    break
+
+        # C. Resolve using single names (e.g. "rahul")
+        if not candidate_name:
+            for word in candidate_words:
+                if len(word) < 3:
+                    continue
+                cur.execute("SELECT full_name FROM oads.patients WHERE full_name ILIKE %s ORDER BY patient_id LIMIT 1", (f"%{word}%",))
+                row = cur.fetchone()
+                if row:
+                    candidate_name = row[0]
+                    break
+
+        if not candidate_name:
+            conn.close()
+            return True, None, None, "not_found", " ".join(candidate_words) if candidate_words else f"Patient ID {patient_id_num}"
+
+        # D. Execute exact verification query
+        cur.execute("""
+            SELECT patient_id, full_name
+            FROM oads.patients
+            WHERE LOWER(full_name) = LOWER(%s)
+        """, (candidate_name,))
+        row = cur.fetchone()
+        conn.close()
+
+        if row:
+            return True, row[0], row[1], "verified", candidate_name
+        else:
+            return True, None, None, "not_found", candidate_name
+
+    except Exception as e:
+        print(f"Error checking patient identity: {e}")
+        return True, None, None, "not_found", " ".join(candidate_words) if candidate_words else None
+
+def parse_chunk_text(text, metadata=None):
+    pid = None
+    study_date = ""
+    image_type = ""
+    findings = ""
+    priority = ""
+    confidence = ""
+    
+    # Parse lines
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith("Patient ID:"):
+            try:
+                pid = int(line.split(":", 1)[1].strip())
+            except:
+                pass
+        elif line.startswith("Study Date:"):
+            study_date = line.split(":", 1)[1].strip()
+        elif line.startswith("Image Type:"):
+            image_type = line.split(":", 1)[1].strip()
+        elif line.startswith("Findings:"):
+            findings = line.split(":", 1)[1].strip()
+        elif line.startswith("Study Priority:"):
+            priority = line.split(":", 1)[1].strip()
+        elif line.startswith("AI Confidence Score:"):
+            confidence = line.split(":", 1)[1].strip()
+            
+    # Fallback to metadata
+    if pid is None and metadata and "patient_id" in metadata:
+        pid = int(metadata["patient_id"])
+    if not study_date and metadata and "study_date" in metadata:
+        study_date = str(metadata["study_date"]).strip()
+    if not image_type and metadata and "image_type" in metadata:
+        image_type = str(metadata["image_type"]).strip()
+    if not priority and metadata and "priority" in metadata:
+        priority = str(metadata["priority"]).strip()
+        
+    return pid, study_date, image_type, findings, priority, confidence
+
+def aggregate_chunks_into_summary(patient_name, patient_id, gender, unique_parsed_chunks):
+    summary_parts = [
+        f"Patient ID: {patient_id}",
+        f"Patient Name: {patient_name}",
+        f"Gender: {gender}",
+        "Imaging Studies & Clinical History:"
+    ]
+    for chunk in unique_parsed_chunks:
+        pid, study_date, image_type, findings, priority, confidence = chunk
+        confidence_str = f" (Confidence: {confidence})" if confidence else ""
+        priority_str = f" ({priority} priority)" if priority else ""
+        summary_parts.append(f"- Date: {study_date} | Type: {image_type.upper()}{priority_str} | Findings: {findings}{confidence_str}")
+        
+    return "\n".join(summary_parts)
+
+def clean_llm_output(text):
+    """
+    Cleans the LLM output to prevent exposing prompt headers and structures.
+    """
+    marker = "final clinical answer:"
+    lower_text = text.lower()
+    if marker in lower_text:
+        idx = lower_text.rfind(marker)
+        return text[idx + len(marker):].strip()
+        
+    headers = [
+        "[ DATABASE STATISTICS ]",
+        "[ PATIENT IMAGING MAPPING ]",
+        "[ PATIENT LAB EVENT CONTEXT ]",
+        "[ STRICT RULES ]"
+    ]
+    lines = text.split("\n")
+    cleaned_lines = []
+    skip_mode = False
+    for line in lines:
+        stripped = line.strip()
+        if any(h in stripped for h in headers):
+            skip_mode = True
+            continue
+        if stripped.startswith("Question:") or stripped.startswith("Final Clinical Answer:"):
+            skip_mode = False
+            continue
+        if skip_mode:
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines).strip()
+
+def fetch_db_statistics():
+    """Queries PostgreSQL for live database statistics in ehr_db."""
+    try:
+        from config import DB_HOST, DB_USER, DB_PASSWORD, DB_PORT
+        import psycopg2
+        conn = psycopg2.connect(host=DB_HOST, database='ehr_db', user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM ehr.patients")
         total_patients = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM oads.studies")
+        cur.execute("SELECT COUNT(*) FROM ehr.labevents")
         total_studies = cur.fetchone()[0]
         cur.close()
         conn.close()
@@ -455,51 +651,210 @@ Provide your evaluation in the following strict JSON format, containing only the
 
 results = []
 
+class MockDocument:
+    def __init__(self, page_content, metadata):
+        self.page_content = page_content
+        self.metadata = metadata
+
+results = []
+
 for idx, tc in enumerate(TEST_CASES):
     print(f"\n[{idx+1}/20] Running Query {tc['id']} [{tc['category']}]")
     print(f"Query: {tc['query']}")
     
     start_total = time.time()
     
-    # 1. Retrieval Phase
+    # 1. Patient Detection & Verification
+    is_patient_query, verified_patient_id, verified_patient_name, lookup_status, detected_name = extract_and_verify_patient(tc["query"])
+    
+    # 2. Retrieval Phase
     start_ret = time.time()
-    retrieved_docs = retriever.invoke(tc["query"])
+    
+    validation_failed = False
+    debug_sql_query = "N/A"
+    debug_sql_records = 0
+    debug_faiss_chunks = 0
+    combined_chunks = []
+    retrieved_pids = set()
+    patient_gender = "Unknown"
+    
+    if is_patient_query and lookup_status == "not_found":
+        validation_failed = True
+    elif is_patient_query and verified_patient_id is not None:
+        # SQL Filtering First
+        sql_query = """
+            SELECT 
+                p.patient_id, p.full_name, p.gender, s.study_date, s.priority, i.image_type, a.findings_summary, a.confidence_score
+            FROM oads.patients p
+            JOIN oads.studies s ON p.patient_id = s.patient_id
+            JOIN oads.images i ON s.study_id = i.study_id
+            LEFT JOIN oads.analysis a ON i.image_id = a.image_id
+            WHERE p.patient_id = %s
+        """
+        debug_sql_query = sql_query.strip()
+        
+        try:
+            conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
+            cur = conn.cursor()
+            cur.execute(sql_query, (verified_patient_id,))
+            sql_rows = cur.fetchall()
+            conn.close()
+            
+            debug_sql_records = len(sql_rows)
+            
+            if sql_rows:
+                patient_gender = sql_rows[0][2] or "Unknown"
+            else:
+                conn = psycopg2.connect(host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT)
+                cur = conn.cursor()
+                cur.execute("SELECT gender FROM oads.patients WHERE patient_id = %s", (verified_patient_id,))
+                row = cur.fetchone()
+                conn.close()
+                if row:
+                    patient_gender = row[0] or "Unknown"
+                    
+            # Format SQL rows as chunks
+            for r in sql_rows:
+                pid, fname, gender, study_date, priority, img_type, findings, confidence = r
+                if hasattr(study_date, "strftime"):
+                    study_date = study_date.strftime("%Y-%m-%d")
+                confidence_str = f"{confidence:.2f}" if confidence is not None else "0.00"
+                findings_str = findings if findings else "No findings recorded"
+                
+                chunk_text = f"Patient ID: {pid}\nPatient Name: {fname}\nGender: {gender}\nStudy Date: {study_date}\nStudy Priority: {priority}\nImage Type: {img_type}\nFindings: {findings_str}\nAI Confidence Score: {confidence_str}\n"
+                meta = {
+                    "patient_id": pid,
+                    "study_date": study_date,
+                    "image_type": img_type,
+                    "findings": findings_str,
+                    "priority": priority,
+                    "confidence": confidence_str
+                }
+                combined_chunks.append((chunk_text, meta))
+                retrieved_pids.add(pid)
+        except Exception as e:
+            debug_sql_query = f"Error in SQL query: {e}"
+            debug_sql_records = 0
+            
+        # FAISS Retrieval Second
+        try:
+            docs = vectorstore.max_marginal_relevance_search(
+                tc["query"], 
+                k=10, 
+                fetch_k=40, 
+                filter={"patient_id": verified_patient_id}
+            )
+            debug_faiss_chunks = len(docs)
+            for doc in docs:
+                combined_chunks.append((doc.page_content, doc.metadata))
+                if "patient_id" in doc.metadata:
+                    retrieved_pids.add(doc.metadata["patient_id"])
+        except Exception as e:
+            print(f"Error in FAISS retrieval: {e}")
+            debug_faiss_chunks = 0
+    else:
+        # Standard Path
+        try:
+            docs = retriever.invoke(tc["query"])
+            debug_faiss_chunks = len(docs)
+            for doc in docs:
+                combined_chunks.append((doc.page_content, doc.metadata))
+                if "patient_id" in doc.metadata:
+                    retrieved_pids.add(doc.metadata["patient_id"])
+        except Exception as e:
+            print(f"Error in FAISS retrieval: {e}")
+            debug_faiss_chunks = 0
+
     ret_latency = time.time() - start_ret
     
-    # Filter context length
+    # Filter context length and verify chunks belong to patient
     context_str = ""
-    used_docs = []
-    for doc in retrieved_docs:
-        if len(context_str) + len(doc.page_content) < 3000:
-            context_str += doc.page_content + "\n\n"
-            used_docs.append(doc)
-        else:
-            break
-            
-    num_chunks = len(used_docs)
-    source_docs = [doc.metadata.get("source", "unknown") for doc in used_docs]
+    verified_chunks = []
+    seen_keys = set()
+    discarded_count = 0
+    mismatched_pids = set()
     
-    # 2. Generation Phase
+    # Before sending context to the LLM: Verify and deduplicate chunks
+    for text, meta in combined_chunks:
+        pid, study_date, image_type, findings, priority, confidence = parse_chunk_text(text, meta)
+        
+        # Verify that all retrieved chunks belong to the same verified_patient_id
+        if verified_patient_id is not None and pid != verified_patient_id:
+            discarded_count += 1
+            if pid is not None:
+                mismatched_pids.add(pid)
+            continue
+        
+        # Deduplicate by patient_id + study_date + image_type + findings
+        key = (pid, str(study_date).strip().lower(), str(image_type).strip().lower(), str(findings).strip().lower())
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        
+        verified_chunks.append((pid, study_date, image_type, findings, priority, confidence))
+        
+    # Aggregate chunks into a single patient summary if patient query
+    if verified_patient_id is not None:
+        if verified_chunks:
+            context_str = aggregate_chunks_into_summary(verified_patient_name, verified_patient_id, patient_gender, verified_chunks)
+        else:
+            context_str = "Not found in database"
+    else:
+        # Standard path context formatting
+        context_parts = []
+        for chunk in verified_chunks:
+            pid, study_date, image_type, findings, priority, confidence = chunk
+            confidence_str = f"Score: {confidence}" if confidence else ""
+            context_parts.append(f"Patient ID: {pid}\nStudy Date: {study_date}\nImage Type: {image_type}\nFindings: {findings}\n{confidence_str}")
+        context_str = "\n\n".join(context_parts)
+            
+    num_chunks = len(verified_chunks)
+    source_docs = ["oads_db"] if debug_sql_records > 0 else []
+    if debug_faiss_chunks > 0:
+        source_docs.append("faiss_db")
+        
+    # Construct used_docs for metrics calculations
+    used_docs = []
+    for chunk in verified_chunks:
+        pid, study_date, image_type, findings, priority, confidence = chunk
+        text = f"Patient ID: {pid}\nStudy Date: {study_date}\nImage Type: {image_type}\nFindings: {findings}\n"
+        meta = {
+            "patient_id": pid,
+            "study_date": study_date,
+            "image_type": image_type,
+            "findings": findings,
+            "priority": priority,
+            "confidence": confidence
+        }
+        used_docs.append(MockDocument(page_content=text, metadata=meta))
+    
+    # 3. Generation Phase
     start_gen = time.time()
     
-    if tc["is_report_generation"] and tc["relevant_patient_ids"]:
+    if validation_failed:
+        gen_response = "Patient not found."
+    elif tc["is_report_generation"] and tc["relevant_patient_ids"]:
         # Simulate patient sidebar lookup & report prompt
         pid = tc["relevant_patient_ids"][0]
-        patient_rows = fetch_patient_studies_from_db(pid)
-        if patient_rows:
-            p_info = patient_rows[0]
-            p_name = p_info[1]
-            p_gender = p_info[2]
-            
-            studies_text = ""
-            for r in patient_rows:
-                if r[3]: # study_date
-                    date_str = r[3].strftime('%Y-%m-%d')
-                    findings = r[6] or "No findings recorded"
-                    img_type = r[5].upper() if r[5] else "Unknown"
-                    studies_text += f"- Date: {date_str}, Type: {img_type}, Priority: {r[4]}, Findings: {findings}\n"
-                    
-            report_prompt = f"""
+        # Verify that verified_patient_id matches pid
+        if verified_patient_id is not None and pid != verified_patient_id:
+            gen_response = "Patient not found."
+        else:
+            patient_rows = fetch_patient_studies_from_db(pid)
+            if patient_rows:
+                p_info = patient_rows[0]
+                p_name = p_info[1]
+                p_gender = p_info[2]
+                
+                studies_text = ""
+                for r in patient_rows:
+                    if r[3]: # study_date
+                        date_str = r[3].strftime('%Y-%m-%d')
+                        findings = r[6] or "No findings recorded"
+                        img_type = r[5].upper() if r[5] else "Unknown"
+                        studies_text += f"- Date: {date_str}, Type: {img_type}, Priority: {r[4]}, Findings: {findings}\n"
+                        
+                report_prompt = f"""
 You are an expert AI radiologist. Based on the following patient details and recent study findings, generate a formal, professional radiology report.
 
 Patient Name: {p_name}
@@ -518,9 +873,10 @@ The report should include the following sections:
 
 Do not output anything else but the report itself.
 """
-            gen_response = generator_llm.invoke(report_prompt).content
-        else:
-            gen_response = "Patient not found in database."
+                gen_response = generator_llm.invoke(report_prompt).content
+                gen_response = clean_llm_output(gen_response)
+            else:
+                gen_response = "Patient not found in database."
     else:
         # Standard RAG
         final_prompt = rag_prompt_template.format(
@@ -530,9 +886,24 @@ Do not output anything else but the report itself.
             question=tc["query"]
         )
         gen_response = generator_llm.invoke(final_prompt).content
+        gen_response = clean_llm_output(gen_response)
         
     gen_latency = time.time() - start_gen
     total_latency = time.time() - start_total
+    
+    retrieved_chunk_count = debug_sql_records + debug_faiss_chunks
+    
+    # Debug print verification details to console
+    debug_detected_name = detected_name if detected_name else "None"
+    debug_verified_id = verified_patient_id if verified_patient_id else "None"
+    
+    print("\n=== RAG PIPELINE DEBUG LOGS ===")
+    print(f"Detected patient name: {debug_detected_name}")
+    print(f"SQL query executed: {debug_sql_query}")
+    print(f"Retrieved patient_id: {debug_verified_id}")
+    print(f"Retrieved chunk count: {retrieved_chunk_count}")
+    print(f"Unique patient_ids found: {list(retrieved_pids)}")
+    print("===============================\n")
     
     print(f"Generated Response (Truncated): {gen_response[:120].strip()}...")
     print(f"Latencies: Ret={ret_latency:.2f}s | Gen={gen_latency:.2f}s | E2E={total_latency:.2f}s")
