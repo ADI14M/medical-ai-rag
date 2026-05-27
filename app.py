@@ -374,7 +374,7 @@ with st.sidebar:
                                 impression_text = ""
                                 recommendations_text = ""
                                 try:
-                                    report_llm = ChatOllama(model="tinyllama", temperature=0.1)
+                                    report_llm = ChatOllama(model="phi3", temperature=0.1)
 
                                     impression_prompt = f"""Based on these radiology findings for patient {patient_info[1]}, write a brief clinical impression in 2-3 sentences. Only output the impression, nothing else.
 
@@ -424,7 +424,7 @@ Findings:
 
 
 # ====================== Settings ======================
-MODEL_NAME = "tinyllama"
+MODEL_NAME = "phi3"
 TEMPERATURE = 0.2
 
 

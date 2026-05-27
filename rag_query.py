@@ -19,7 +19,7 @@ retriever = vectorstore.as_retriever(
 )
 
 llm = ChatOllama(
-    model="tinyllama",
+    model="phi3",
     temperature=0.2,
     num_ctx=2048,
 )
