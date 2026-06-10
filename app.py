@@ -374,7 +374,8 @@ with st.sidebar:
                                 impression_text = ""
                                 recommendations_text = ""
                                 try:
-                                    report_llm = ChatOllama(model="phi3", temperature=0.1)
+                                    # Always use clinical model for radiology report generation
+                                    report_llm = ChatOllama(model="medgemma1.5:4b", temperature=0.1)
 
                                     impression_prompt = f"""Based on these radiology findings for patient {patient_info[1]}, write a brief clinical impression in 2-3 sentences. Only output the impression, nothing else.
 
@@ -424,8 +425,19 @@ Findings:
 
 
 # ====================== Settings ======================
-MODEL_NAME = "phi3"
 TEMPERATURE = 0.2
+
+def get_llm(question):
+    """Routes the question to the appropriate model based on clinical intent."""
+    q_lower = question.lower()
+    clinical_keywords = [
+        "summarize", "radiology", "ct", "mri", "abnormalities", "clinical", 
+        "findings", "diagnosis", "recommendations", "scan", "xray", "ultrasound",
+        "impression", "report", "patient", "history", "health", "disease", "treatment"
+    ]
+    if any(k in q_lower for k in clinical_keywords):
+        return "medgemma1.5:4b"
+    return "phi3"
 
 
 TOP_K = 10
@@ -799,7 +811,7 @@ if prompt := st.chat_input("Ask a medical question..."):
 
             # ====================== PROMPT ======================
             prompt_template = ChatPromptTemplate.from_template("""
-You are a direct, robotic medical assistant.
+You are a comprehensive, highly detailed medical assistant.
 
 [ DATABASE STATISTICS ]
 Total Registered Patients: {total_patients}
@@ -811,9 +823,9 @@ Total EHR Lab Events: {total_labevents}
 
 [ STRICT RULES ]
 1. Answer using ONLY natural language. NEVER output raw SQL queries or database code.
-2. Focus on clinical summarization, specifically pointing out any values flagged as ABNORMAL.
-3. Provide cohesive patient insights based on the retrieved lab events.
-4. Output ONLY the final analytical answer. DO NOT explain your reasoning.
+2. Provide a detailed and comprehensive clinical summarization of the retrieved context. Explicitly point out any values flagged as ABNORMAL and expand on their potential significance.
+3. Provide cohesive, thoroughly explained patient insights based on the retrieved lab events and imaging.
+4. Output a rich, structured analytical answer. Explain your findings clearly to the user in a professional medical tone.
 5. If the answer cannot be confidently deduced from the Context or Database Statistics, output exactly: "Not found in database".
 
 Question: {question}
@@ -830,10 +842,14 @@ Final Clinical Answer:
             )
 
             # ====================== LLM ======================
+            selected_model = get_llm(prompt)
             llm = ChatOllama(
-                model=MODEL_NAME,
+                model=selected_model,
                 temperature=TEMPERATURE,
-                num_ctx=2048  # Hard cap memory allocation to stay under 2.5 GiB
+                num_ctx=2048,  # Hard cap memory allocation to stay under 2.5 GiB
+                repeat_penalty=1.2, # Strictly penalize repetitive phrases to prevent loops
+                top_k=40,
+                top_p=0.9
             )
 
             stream = llm.stream(final_prompt)
@@ -871,32 +887,10 @@ Final Clinical Answer:
             print(f"Retrieved patient_id: {debug_verified_id}")
             print(f"Retrieved chunk count: {retrieved_chunk_count}")
             print(f"Unique patient_ids found: {list(retrieved_pids)}")
+            print(f"Selected Model: {selected_model}")
             print("===============================\n")
 
-            # Render in Streamlit UI
-            with st.expander("Developer Debug Logs", expanded=False):
-                st.markdown(f"**Detected Patient Name:** `{debug_detected_name}`")
-                st.markdown(f"**Verified Patient ID:** `{debug_verified_id}`")
-                st.markdown(f"**SQL Query Executed:**\n```sql\n{debug_sql_query}\n```")
-                st.markdown(f"**Retrieved patient_id:** `{debug_verified_id}`")
-                st.markdown(f"**Retrieved chunk count:** `{retrieved_chunk_count}`")
-                st.markdown(f"**Unique patient_ids found:** `{list(retrieved_pids)}`")
-                if verified_patient_id is not None:
-                    st.markdown(f"**FAISS Chunks Discarded:** `{discarded_count}`")
-                    if mismatched_pids:
-                        st.markdown(f"**Mismatched Patient IDs Discarded:** `{list(mismatched_pids)}`")
-                
-                st.divider()
-                st.markdown("### 📊 Database Statistics")
-                st.markdown(f"- **Total Registered Patients:** {stats['total_patients']}")
-                st.markdown(f"- **Total EHR Lab Events:** {stats['total_labevents']}")
-                st.markdown(f"**Patient Imaging Mapping:**\n{stats.get('imaging_summary', '')}")
-                
-                st.markdown("### 📄 Patient Lab Event Context")
-                st.text_area("Context Chunks Sent to LLM", context, height=150)
-                
-                st.markdown("### ⚙️ LLM Prompt Instructions")
-                st.text_area("Final Prompt Generation Input", final_prompt, height=250)
+
 
     st.session_state.messages.append({
         "role": "assistant",
